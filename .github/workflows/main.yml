@@ -1,0 +1,67 @@
+name: Render Short
+
+on:
+  workflow_dispatch:
+    inputs:
+      row:
+        description: "Numero da linha na planilha"
+        required: true
+      titulo:
+        description: "Titulo do video"
+        required: true
+      roteiro:
+        description: "Texto da narracao"
+        required: true
+      termos:
+        description: "Termos de busca em ingles, separados por virgula"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install --upgrade edge-tts requests
+
+      - name: Gerar video
+        env:
+          ROW: ${{ inputs.row }}
+          TITULO: ${{ inputs.titulo }}
+          ROTEIRO: ${{ inputs.roteiro }}
+          TERMOS: ${{ inputs.termos }}
+          PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
+        run: python render.py
+
+      - name: Publicar video em Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROW: ${{ inputs.row }}
+          TITULO: ${{ inputs.titulo }}
+        run: |
+          TAG="short-${ROW}-${GITHUB_RUN_ID}"
+          gh release create "$TAG" "out/short_${ROW}.mp4" --title "$TAG" --notes "$TITULO"
+          echo "VIDEO_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/short_${ROW}.mp4" >> "$GITHUB_ENV"
+
+      - name: Avisar o n8n (opcional)
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+          ROW: ${{ inputs.row }}
+          TITULO: ${{ inputs.titulo }}
+        run: |
+          if [ -n "$N8N_WEBHOOK_URL" ]; then
+            jq -n --arg row "$ROW" --arg titulo "$TITULO" --arg url "$VIDEO_URL" \
+              '{row: $row, titulo: $titulo, video_url: $url}' \
+              | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$N8N_WEBHOOK_URL"
+          else
+            echo "N8N_WEBHOOK_URL nao definido, pulando aviso."
+          fi
