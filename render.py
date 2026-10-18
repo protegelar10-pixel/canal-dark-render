@@ -26,6 +26,9 @@ TOM = "-8Hz"
 SEG_SEGUNDOS = 5          # duracao de cada clipe de fundo
 PALAVRAS_POR_LEGENDA = 3
 FALLBACK = ["dark forest fog", "night sky stars", "abandoned building", "dark ocean waves"]
+BRILHO_MIN = 28    # abaixo disso o clipe fica quase preto
+BRILHO_MAX = 105   # acima disso o clipe fica claro demais para o clima dark
+BRILHO_ALVO = 65
 
 WORK = Path("work")
 OUT = Path("out")
@@ -115,39 +118,69 @@ def baixar(url, destino):
                 f.write(parte)
 
 
+def luminosidade(caminho):
+    """Brilho medio (0 a 255) dos primeiros segundos do clipe."""
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-t", str(SEG_SEGUNDOS), "-i", str(caminho),
+         "-vf", "scale=64:-1,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=-",
+         "-f", "null", "-"],
+        capture_output=True, text=True)
+    valores = []
+    for linha in r.stdout.splitlines():
+        if "YAVG=" in linha:
+            try:
+                valores.append(float(linha.split("=")[1]))
+            except ValueError:
+                pass
+    return sum(valores) / len(valores) if valores else 60.0
+
+
 def montar_fundo(duracao):
-    """Baixa clipes, recorta para 9:16 e concatena em work/fundo.mp4."""
+    """Baixa clipes, escolhe os sombrios (nem pretos, nem claros), recorta 9:16 e concatena."""
     precisa = math.ceil(duracao / SEG_SEGUNDOS) + 1
     candidatos = []
     for termo in TERMOS + FALLBACK:
         for u in buscar_videos(termo):
             if u not in candidatos:
                 candidatos.append(u)
-        if len(candidatos) >= precisa * 2:
+        if len(candidatos) >= precisa * 3:
             break
     if not candidatos:
         raise SystemExit("Nenhum video encontrado na Pixabay. Confira a chave PIXABAY_KEY.")
+    candidatos = candidatos[:precisa * 3]
 
-    # mistura um pouco, mas mantem os primeiros termos (mais relevantes) no inicio
-    topo, resto = candidatos[:precisa], candidatos[precisa:]
-    random.shuffle(resto)
-    fila = (topo + resto)[:precisa]
-
-    segmentos = []
-    for i in range(precisa):
-        url = fila[i % len(fila)]
+    # baixa e mede o brilho de cada candidato
+    baixados = []  # (ordem, caminho, brilho)
+    for i, url in enumerate(candidatos):
         bruto = WORK / f"bruto_{i}.mp4"
-        seg = WORK / f"seg_{i}.mp4"
         try:
             baixar(url, bruto)
+            baixados.append((i, bruto, luminosidade(bruto)))
+            print(f"Clipe {i}: brilho {baixados[-1][2]:.0f}", flush=True)
+        except Exception as e:
+            print(f"Aviso: clipe {i} ignorado: {e}", file=sys.stderr)
+    if not baixados:
+        raise SystemExit("Nenhum clipe pode ser baixado.")
+
+    # prefere clipes na faixa sombria legivel; mantem a ordem de relevancia dos termos
+    bons = [c for c in baixados if BRILHO_MIN <= c[2] <= BRILHO_MAX]
+    outros = sorted((c for c in baixados if c not in bons), key=lambda c: abs(c[2] - BRILHO_ALVO))
+    escolhidos = (bons + outros)[:precisa]
+    print(f"Clipes na faixa ideal: {len(bons)} de {len(baixados)}", flush=True)
+
+    segmentos = []
+    for n in range(precisa):
+        _, bruto, _ = escolhidos[n % len(escolhidos)]
+        seg = WORK / f"seg_{n}.mp4"
+        try:
             run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(bruto), "-t", str(SEG_SEGUNDOS),
                  "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                        "fps=30,setsar=1,eq=brightness=-0.08:saturation=0.75",
+                        "fps=30,setsar=1,eq=brightness=-0.03:saturation=0.7:contrast=1.05",
                  "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-pix_fmt", "yuv420p", str(seg)])
             segmentos.append(seg)
         except Exception as e:
-            print(f"Aviso: clipe {i} ignorado: {e}", file=sys.stderr)
+            print(f"Aviso: segmento {n} ignorado: {e}", file=sys.stderr)
 
     if not segmentos:
         raise SystemExit("Nenhum clipe pode ser preparado.")
@@ -161,7 +194,7 @@ def montar_fundo(duracao):
 def renderizar(duracao):
     estilo = ("FontName=DejaVu Sans,Bold=1,FontSize=12,PrimaryColour=&H00FFFFFF,"
               "OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=60")
-    filtro = f"vignette=PI/4,subtitles=legenda.srt:force_style='{estilo}'"
+    filtro = f"vignette=PI/5,subtitles=legenda.srt:force_style='{estilo}'"
     saida = OUT / f"short_{ROW}.mp4"
     run(["ffmpeg", "-y", "-loglevel", "error",
          "-stream_loop", "-1", "-i", str(WORK / "fundo.mp4"),
